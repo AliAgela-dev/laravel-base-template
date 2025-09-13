@@ -10,6 +10,7 @@ use Illuminate\Http\Request;
 use App\Models\Otp;
 use App\Models\User;
 use Illuminate\Support\Facades\Auth;
+use App\Services\OTP\OtpService;
 
 class AuthController extends Controller
 {
@@ -17,19 +18,18 @@ class AuthController extends Controller
     {
         $data = $request->validated();
 
-        $validOtp = Otp::forPhoneNumber($data['phone_number'])
-            ->forPurpose('register')
-            ->forOtpCode($data['otp'])
-            ->firstOrFail()
-            ->isVerifiedUnderIntime();
-        if (!$validOtp) {
-            return response()->json(['message' => __('auth.invalid_or_expired_otp')], 400);
-        } else {
-            unset($data['otp']);
-            $data['password'] = bcrypt($data['password']);
-            User::create($data);
-        }
-        return response()->json(['message' => __('auth.user_registered_successfully')], 201);
+        $data['password'] = bcrypt($data['password']);
+        
+        // Add default values for required fields that we removed from registration
+        $data['last_name'] = $data['last_name'] ?? '';
+        $data['gender'] = $data['gender'] ?? 'other';
+        
+        $user = User::create($data);
+        
+        $otpService = new OtpService();
+        $otpService->generateOtp($user->phone_number, 'account_verification');
+        
+        return response()->json(['message' => __('auth.user_registered_successfully_otp_sent')], 201);
     }
 
     public function login(LogInRequest $request)
@@ -40,6 +40,7 @@ class AuthController extends Controller
             return response()->json(['message' => __('auth.invalid_credentials')], 401);
         }
 
+        /** @var \App\Models\User $user */
         $user = Auth::user();
 
         $token = $user->createToken('auth_token')->plainTextToken;
@@ -53,6 +54,7 @@ class AuthController extends Controller
 
     public function logout(Request $request)
     {
+        /** @var \App\Models\User $user */
         $user = Auth::user();
         $user->tokens()->delete();
 
@@ -63,16 +65,23 @@ class AuthController extends Controller
     {
         $data = $request->validated();
 
-
-        $validOtp = Otp::forPhoneNumber($data['phone_number'])
+        $otpRecord = Otp::forPhoneNumber($data['phone_number'])
             ->forPurpose('reset_password')
             ->forOtpCode($data['otp'])
-            ->firstOrFail()
-            ->isVerifiedUnderIntime();
-
-        if (!$validOtp) {
+            ->forUnverified()  // Only get unverified OTPs
+            ->first();
+            
+        if (!$otpRecord) {
             return response()->json(['message' => __('auth.invalid_or_expired_otp')], 400);
         }
+        
+        // Check if OTP is expired
+        if ($otpRecord->isExpired()) {
+            return response()->json(['message' => __('auth.invalid_or_expired_otp')], 400);
+        }
+        
+        // Verify the OTP (mark it as used)
+        $otpRecord->verify();
 
         $user = User::where('phone_number', $data['phone_number'])->firstOrFail();
 
